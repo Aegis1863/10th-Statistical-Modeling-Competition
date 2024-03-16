@@ -5,5 +5,4 @@
 !/wandb/**/*.log
 latest_run
 *.pyc
-orders_2023.csv
-customers.csv
+data/
