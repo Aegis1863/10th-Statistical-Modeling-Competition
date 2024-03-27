@@ -28,9 +28,10 @@ parser.add_argument('--begin_seed', default=42, type=int, help='起始种子')
 parser.add_argument('--end_seed', default=52, type=int, help='结束种子')
 args = parser.parse_args()
 
-hetero_graph = dgl.load_graphs(args.file_path)[0][0]
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device = device if args.device == None else args.device
+hetero_graph = dgl.load_graphs(args.file_path)[0][0]
+
 print(f'device: {device}')
 print('图结构: \n', hetero_graph)
 
@@ -316,6 +317,7 @@ def train_etype_one_epoch(etype, spec_dataloader):
 # 执行训练
 for seed in range(args.begin_seed, args.end_seed):
     torch.manual_seed(seed)
+    dgl.seed(seed)
     # 采样定义
     neg_sample_count = 1
     batch_size = 11892915 // 200
@@ -324,20 +326,16 @@ for seed in range(args.begin_seed, args.end_seed):
     # 边的条数,数目比顶点个数多很多.
     # 这是 EdgeDataLoader 数据加载器
 
-    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(
-        11892915, dtype=torch.bool).bernoulli(1.0)
-    train_item_eids = hetero_graph.edges['order'].data['train_mask'].nonzero(as_tuple=True)[
-        0]
+    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(11892915, dtype=torch.bool).bernoulli(1.0)
+    train_item_eids = hetero_graph.edges['order'].data['train_mask'].nonzero(as_tuple=True)[0]
 
-    sampler = as_edge_prediction_sampler(
-        sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
+    sampler = as_edge_prediction_sampler(sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
 
     item_dataloader = dgl.dataloading.DataLoader(
         hetero_graph, {'order': train_item_eids}, sampler,
         batch_size=batch_size, shuffle=True)
 
-    # in_feats = hetero_graph.nodes['user'].data['feature'].shape[1]
-    hidden_feat_dim = 12
+    hidden_feat_dim = 12  # 客户特征长度
     out_feat_dim = 12
 
     embed_layer = RelGraphEmbed(hetero_graph, hidden_feat_dim)
