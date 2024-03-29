@@ -16,13 +16,13 @@ import tqdm
 import torch as th
 import dgl.nn as dglnn
 import gc
+import wandb
+from sklearn.metrics import confusion_matrix
 gc.collect()
 
 parser = argparse.ArgumentParser(description='Link prediction')
-parser.add_argument('-f', '--file_path',
-                    default='data/graph_data.bin', type=str, help='dgl图文件路径')
-parser.add_argument('-d', '--device', default=None,
-                    type=str, help='设备, cpu或cuda')
+parser.add_argument('-f', '--file_path', default='data/graph_data.bin', type=str, help='dgl图文件路径')
+parser.add_argument('-d', '--device', default=None, type=str, help='设备, cpu或cuda')
 parser.add_argument('-e', '--epoch', default=20, type=int, help='运行回合数')
 parser.add_argument('--begin_seed', default=42, type=int, help='起始种子')
 parser.add_argument('--end_seed', default=52, type=int, help='结束种子')
@@ -113,6 +113,7 @@ class RelGraphConvLayer(nn.Module):
 
         # 多类型的边结点卷积完成后的输出
         # 输入的是blocks 和 embeding
+        # inputs = {key: value.to(device) for key, value in inputs.items()}
         hs = self.conv(g, inputs, mod_kwargs=wdict)
 
         def _apply(ntype, h):
@@ -124,7 +125,6 @@ class RelGraphConvLayer(nn.Module):
                 h = self.activation(h)
             return self.dropout(h)
 
-        #
         return {ntype: _apply(ntype, h) for ntype, h in hs.items()}
 
 
@@ -187,14 +187,6 @@ class EntityClassify(nn.Module):
             self.num_bases, activation=F.relu, self_loop=self.use_self_loop,
             dropout=self.dropout, weight=False))
 
-        # h2h , 这里不添加隐层,只用2层卷积
-        # for i in range(self.num_hidden_layers):
-        #    self.layers.append(RelGraphConvLayer(
-        #        self.h_dim, self.h_dim, self.rel_names,
-        #        self.num_bases, activation=F.relu, self_loop=self.use_self_loop,
-        #        dropout=self.dropout))
-        # h2o
-
         self.layers.append(RelGraphConvLayer(
             self.h_dim, self.out_dim, self.rel_names,
             self.num_bases, activation=None,
@@ -215,8 +207,8 @@ class EntityClassify(nn.Module):
             for layer, block in zip(self.layers, blocks):
                 h = layer(block, h)
         return h
-
-    def inference(self, g, batch_size, device=device, num_workers=0, x=None):
+    
+    def inference(self, g, batch_size, device="cpu", num_workers=0, x=None):
 
         if x is None:
             x = self.embed_layer()
@@ -226,10 +218,11 @@ class EntityClassify(nn.Module):
                 k: th.zeros(
                     g.number_of_nodes(k),
                     self.h_dim if l != len(self.layers) - 1 else self.out_dim)
-                for k in g.ntypes}
-
+                for k in g.ntypes
+                }
+            
             sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
-            dataloader = dgl.dataloading.NodeDataLoader(
+            dataloader = dgl.dataloading.DataLoader(
                 g,
                 {k: th.arange(g.number_of_nodes(k)) for k in g.ntypes},
                 sampler,
@@ -237,32 +230,25 @@ class EntityClassify(nn.Module):
                 shuffle=True,
                 drop_last=False,
                 num_workers=num_workers)
-
+            
             for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader):
                 # print(input_nodes)
-                block = blocks[0].to(device)
-
-                h = {k: x[k][input_nodes[k]].to(device)
-                     for k in input_nodes.keys()}
+                block = blocks[0]  # .to(device)
+                h = {k: x[k][input_nodes[k]].to(device) for k in input_nodes.keys()}
                 h = layer(block, h)
-
                 for k in h.keys():
                     y[k][output_nodes[k]] = h[k].cpu()
-
             x = y
         return y
 
+
 # 根据节点类型和节点ID抽取embeding 参与模型训练更新
-
-
 def extract_embed(node_embed, input_nodes):
     emb = {}
     for ntype, nid in input_nodes.items():
         nid = input_nodes[ntype]
-        emb[ntype] = node_embed[ntype][nid]
+        emb[ntype] = node_embed[ntype][nid.to('cpu')]
     return emb
-
-# Define a Heterograph Conv model
 
 
 class Model(nn.Module):
@@ -275,10 +261,10 @@ class Model(nn.Module):
         self.pred = HeteroDotProductPredictor()
 
     def forward(self, h, pos_g, neg_g, blocks, etype):
-        h = self.rgcn(h, blocks)
+        h = self.rgcn(h, blocks)  # h 是客户的维度12的特征矩阵，输出是转换后的嵌入
         return self.pred(pos_g, h, etype), self.pred(neg_g, h, etype)
-
-
+    
+    
 class MarginLoss(nn.Module):
 
     def forward(self, pos_score, neg_score):
@@ -290,11 +276,11 @@ class MarginLoss(nn.Module):
 class HeteroDotProductPredictor(nn.Module):
 
     def forward(self, graph, h, etype):
-        # 在计算之外更新h,保存为全局可用
+        # 在计算之外更新h, 保存为全局可用
         # h contains the node representations for each edge type computed from node_clf_hetero.py
         with graph.local_scope():
             graph.ndata['h'] = h  # assigns 'h' of all node types in one shot
-            graph.apply_edges(fn.u_dot_v('h', 'h', 'score'), etype=etype)
+            graph.apply_edges(fn.u_dot_v('h', 'h', 'score'), etype=etype)  # * 在这里给出分数
             return graph.edges[etype].data['score']
 
 
@@ -309,24 +295,24 @@ def train_etype_one_epoch(etype, spec_dataloader):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-    print('{:s} Epoch {:d} | Loss {:.4f}'.format(
-        etype, seed, sum(losses) / len(losses)))
+    print('{:s} Seed {:d} | avg_Loss {:.4f}'.format(etype, seed, sum(losses) / len(losses)))
     return losses
 
-
 # 执行训练
-for seed in range(args.begin_seed, args.end_seed):
+loss_table = {}
+for seed in range(45, 46):
     torch.manual_seed(seed)
     dgl.seed(seed)
     # 采样定义
-    neg_sample_count = 1
-    batch_size = 11892915 // 200
+    # neg_sample_count = (hetero_graph['order'].num_edges() // hetero_graph.nodes['customer'][0]['index'].shape[0]) * 1000
+    neg_sample_count = 2000
+    batch_size = hetero_graph['order'].num_edges() // 250
     # 采样2层全部节点
     sampler = MultiLayerFullNeighborSampler(2)
     # 边的条数,数目比顶点个数多很多.
     # 这是 EdgeDataLoader 数据加载器
 
-    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(11892915, dtype=torch.bool).bernoulli(1.0)
+    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(hetero_graph['order'].num_edges(), dtype=torch.bool).bernoulli(1.0)
     train_item_eids = hetero_graph.edges['order'].data['train_mask'].nonzero(as_tuple=True)[0]
 
     sampler = as_edge_prediction_sampler(sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
@@ -347,12 +333,15 @@ for seed in range(args.begin_seed, args.end_seed):
     optimizer = torch.optim.Adam(all_params, lr=0.01, weight_decay=0)
 
     loss_func = MarginLoss()
+    
 
-    loss_table = {}
-    print("start epoch:", seed)
+    print("start seed:", seed)
     model.train()
     losses = train_etype_one_epoch('order', item_dataloader)
     loss_table[seed] = losses
-
+    # 保存模型
+    torch.save(model.state_dict(), f'ckpt/model_params_{seed}.pt')
+    
+# 保存训练结果
 loss_table = pd.DataFrame(loss_table)
-loss_table.to_csv(f'data/result.csv')
+loss_table.to_csv(f'data/result.csv', index=False, encoding='utf-8-sig')

@@ -6,3 +6,4 @@
 latest_run
 *.pyc
 data/
+ckpt/
