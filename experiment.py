@@ -1,154 +1,140 @@
+import argparse
+import warnings
 import os
-import sys
-import copy
-import numpy as np
-from sklearn.metrics import roc_auc_score, f1_score, average_precision_score
-from torch.optim.lr_scheduler import StepLR
-from torch_geometric.utils import negative_sampling
-from tqdm import tqdm
-root_path = os.path.abspath(os.path.dirname(os.getcwd()))
-sys.path.append(root_path)
+import itertools
+import seaborn as sns
 import torch
+import torch.nn as nn
+from sklearn.metrics import roc_auc_score, average_precision_score
 import torch_geometric.transforms as T
-from torch import nn
-from torch_geometric.datasets import DBLP
+from torch_geometric.utils import negative_sampling
 from torch_geometric.nn import RGCNConv
+from torch_geometric.loader import DataLoader, ClusterData, ClusterLoader, LinkNeighborLoader
+import pandas as pd
+import numpy as np
+import torch
 import torch.nn.functional as F
+from tqdm import tqdm, trange
+warnings.filterwarnings('ignore')
 
-def train_negative_sample(train_data):
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+hetero_data = torch.load('data/model/pyg/hetero_graph_v1.pt')
+
+
+class RelGraphEmbed(nn.Module):
+    r"""Embedding layer for featureless heterograph."""
+
+    def __init__(self,
+                 g,
+                 embed_size=16,
+                 embed_name='embed',
+                 activation=None,
+                 dropout=0.0):
+        super().__init__()
+        self.g = g
+        self.embed_size = embed_size
+        self.embed_name = embed_name
+        self.activation = activation
+        self.dropout = nn.Dropout(dropout)
+
+        # create weight embeddings for each node for each relation
+        self.embeds = nn.ParameterDict()
+        for ntype in g.node_types:
+            embed = nn.Parameter(torch.Tensor(
+                g[ntype].x.shape[0], self.embed_size))
+            nn.init.xavier_uniform_(embed, gain=nn.init.calculate_gain('relu'))
+            self.embeds[ntype] = embed
+
+    def forward(self):
+        return self.embeds
+
+
+def negative_sample(data):
+    # 从训练集中采样与正边相同数量的负边
     neg_edge_index = negative_sampling(
-        edge_index=train_data.edge_index, num_nodes=train_data.num_nodes,
-        num_neg_samples=train_data.edge_label_index.size(1), method='sparse')
+        edge_index=data.edge_index, num_nodes=data.num_nodes,
+        num_neg_samples=data.edge_label_index.size(1), method='sparse')
+    # print(neg_edge_index.size(1))   # 3642条负边，即每次采样与训练集中正边数量一致的负边
     edge_label_index = torch.cat(
-        [train_data.edge_label_index, neg_edge_index],
+        [data.edge_label_index, neg_edge_index],
         dim=-1,
     )
     edge_label = torch.cat([
-        train_data.edge_label,
-        train_data.edge_label.new_zeros(neg_edge_index.size(1))
+        data.edge_label,
+        data.edge_label.new_zeros(neg_edge_index.size(1))
     ], dim=0)
 
     return edge_label, edge_label_index
 
-def get_metrics(out, edge_label):
-    edge_label = edge_label.cpu().numpy()
-    out = out.cpu().numpy()
-    pred = (out > 0.5).astype(int)
-    auc = roc_auc_score(edge_label, out)
-    f1 = f1_score(edge_label, pred)
-    ap = average_precision_score(edge_label, out)
 
-    return auc, f1, ap
+def transform_data(data, batch=True, num_parts=128, batch_size=32, to_homo=True):
+    '''_summary_
 
-@torch.no_grad()
-def test(model, val_data, test_data):
-    model.eval()
-    # cal val loss
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    out = model(val_data,
-                val_data.edge_label_index).view(-1)
-    val_loss = criterion(out, val_data.edge_label)
-    # cal metrics
-    out = model(test_data,
-                test_data.edge_label_index).view(-1).sigmoid()
-    model.train()
+    Parameters
+    ----------
+    data : pyg 图数据
+    num_parts : 邻接矩阵分割块数，默认128
+    batch_size : 批量数，默认32
 
-    auc, f1, ap = get_metrics(out, test_data.edge_label)
+    此情况下train_loader包含4（=128/32）块
 
-    return val_loss, auc, ap
-
-
-def train(model, train_data, val_data, test_data, save_model_path):
-    model = model.to(device)
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=0.01)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
-    min_epochs = 10
-    min_val_loss = np.Inf
-    final_test_auc = 0
-    final_test_ap = 0
-    best_model = None
-    model.train()
-    for epoch in tqdm(range(100)):
-        optimizer.zero_grad()
-        edge_label, edge_label_index = train_negative_sample(train_data)
-        out = model(train_data, edge_label_index).view(-1)
-        loss = criterion(out, edge_label)
-        loss.backward()
-        optimizer.step()
-        # validation
-        val_loss, test_auc, test_ap = test(model, val_data, test_data)
-        if epoch + 1 > min_epochs and val_loss < min_val_loss:
-            min_val_loss = val_loss
-            final_test_auc = test_auc
-            final_test_ap = test_ap
-            best_model = copy.deepcopy(model)
-            # save model
-            state = {'model': best_model.state_dict()}
-            torch.save(state, save_model_path)
-
-        print('epoch {:03d} train_loss {:.8f} val_loss {:.4f} test_auc {:.4f} test_ap {:.4f}'
-              .format(epoch, loss.item(), val_loss, test_auc, test_ap))
-
-    state = {'model': best_model.state_dict()}
-    torch.save(state, save_model_path)
-
-    return final_test_auc, final_test_ap
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-transform = T.Compose([
-    T.NormalizeFeatures(),
-    T.ToDevice(device),
-])
-
-dataset = DBLP(root_path + '/data/DBLP', transform=transform)
-graph = dataset[0]
-print(graph)
-
-num_classes = torch.max(graph['author'].y).item() + 1
-graph['conference'].x = torch.randn((graph['conference'].num_nodes, 128))
-graph = graph.to(device)
-
-node_types, edge_types = graph.metadata()
-num_nodes = graph['author'].x.shape[0]
-num_relations = len(edge_types)
-init_sizes = [graph[node_type].x.shape[1] for node_type in node_types]
-init_x = [graph[node_type].x for node_type in node_types]
-
-homogeneous_graph = graph.to_homogeneous()
-train_data, val_data, test_data = T.RandomLinkSplit(
-        num_val=0.1,
-        num_test=0.1,
+    Returns
+    -------
+    train_loader, val_data, test_data
+    '''
+    print('>>> 正在分割数据集并分批...')
+    if to_homo == True:
+        data = data.to_homogeneous()
+    train_data, val_data, test_data = T.RandomLinkSplit(
+        num_val=0.15,
+        num_test=0.15,
         is_undirected=True,
         add_negative_train_samples=False,
         disjoint_train_ratio=0,
-        edge_types=[('author', 'to', 'paper'), ('paper', 'to', 'term'),
-                    ('paper', 'to', 'conference')],
-        rev_edge_types=[('paper', 'to', 'author'), ('term', 'to', 'paper'),
-                        ('conference', 'to', 'paper')]
-    )(homogeneous_graph)
+        edge_types=hetero_data.metadata()[1][:int(
+            0.5*len(hetero_data.metadata()[1]))],
+        rev_edge_types=hetero_data.metadata()[1][int(
+            0.5*len(hetero_data.metadata()[1])):]
+    )(data)
 
-print(train_data)
-print(val_data)
-print(test_data)
+    if batch:
+        '''
+        # 训练集太大，分批量
+        tmp_cls = ClusterData(train_data, num_parts)
+        train_loader = ClusterLoader(tmp_cls, batch_size=batch_size)
+        '''
+        train_loader = LinkNeighborLoader(
+            train_data,
+            [512, 256, 128],
+            batch_size=32768,
+            edge_label=train_data.edge_label,
+            edge_label_index=train_data.edge_label_index)
+        return train_loader, val_data, test_data
+    return train_data, val_data, test_data
 
 
 class RGCN_LP(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
+    def __init__(self, in_channels, hidden_channels, out_channels,
+                 num_relations, node_types, init_sizes, dropout=0.5, reg_lambda=0.01):
         super(RGCN_LP, self).__init__()
+        self.dropout = dropout
+        self.reg_lambda = reg_lambda
+        self.node_types = node_types
         self.conv1 = RGCNConv(in_channels, hidden_channels,
-                              num_relations=num_relations, num_bases=30)
+                              num_relations=num_relations)
         self.conv2 = RGCNConv(hidden_channels, out_channels,
-                              num_relations=num_relations, num_bases=30)
+                              num_relations=num_relations)
         self.lins = torch.nn.ModuleList()
-        self.norm = nn.LayerNorm(in_channels)
         for i in range(len(node_types)):
             lin = nn.Linear(init_sizes[i], in_channels)
             self.lins.append(lin)
-
         self.fc = nn.Sequential(
-            nn.Linear(2 * out_channels, 1)
+            nn.Linear(2 * out_channels, 1),
+            nn.Sigmoid()
         )
+        # self.fc = nn.Linear(out_channels, out_channels//2)
+        # self.sigmoid = nn.Sigmoid()
 
     def trans_dimensions(self, xs):
         res = []
@@ -157,37 +143,154 @@ class RGCN_LP(nn.Module):
         return torch.cat(res, dim=0)
 
     def encode(self, data):
-        x = self.trans_dimensions(init_x)
+        x = [data.x[data.node_type == node_type]
+             for node_type in self.node_types]
+        x = self.trans_dimensions(x)
         edge_index, edge_type = data.edge_index, data.edge_type
-        x = F.relu(self.conv1(x, edge_index, edge_type))
-        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv1(x, edge_index, edge_type)
+        x = F.relu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.conv2(x, edge_index, edge_type)
-
         return x
 
-    def decode(self, z, edge_label_index):
-        src = z[edge_label_index[0]]
-        dst = z[edge_label_index[1]]
+    def decode(self, z, index):
+        src = z[index[0]]
+        dst = z[index[1]]
         x = torch.cat([src, dst], dim=-1)
         x = self.fc(x)
-
         return x
 
-    def forward(self, data, edge_label_index):
+    def forward(self, data, index):
         z = self.encode(data)
-        return self.decode(z, edge_label_index)
+        z = self.decode(z, index)
+        return z  # 输出概率值
+
+    def l2_regularization(self):
+        l2_reg = torch.tensor(0.0, device=device)
+        for param in self.parameters():
+            l2_reg += torch.norm(param, p=2)
+        return self.reg_lambda * l2_reg
 
 
-def main():
-    model = RGCN_LP(128, 64, 128).to(device)
-    test_auc, test_ap = train(model,
-                              train_data,
-                              val_data,
-                              test_data,
-                              save_model_path=root_path + '/models/rgcn.pkl')
-    print('final best auc:', test_auc)
-    print('final best ap:', test_ap)
+def get_metrics(out, label):
+    auc = roc_auc_score(label.cpu().numpy(), out.cpu().numpy())
+    ap = average_precision_score(label.cpu().numpy(), out.cpu().numpy())
+    return auc, ap
 
 
-if __name__ == '__main__':
-    main()
+def prepare_data(random_feat, data, random_feat_dim, feat_flag,
+                 data_path='data/model/pyg/splited_data',
+                 batch=True, to_homo=True):
+    batch_flag = 'batch' if batch else 'full'
+    if random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
+        print('>>> 读取已有可训练随机编码...')
+        train_loader, val_data, test_data = torch.load(
+            f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
+        embed_layer = None
+    elif random_feat:
+        print('>>> 为节点分配可训练随机编码...')
+        embed_layer = RelGraphEmbed(data, random_feat_dim)
+        for node_type in data.node_types:
+            data[node_type].x = embed_layer()[node_type]
+        train_loader, val_data, test_data = transform_data(
+            data, to_homo=to_homo, batch=batch)
+        torch.save(DataLoader([train_loader, val_data, test_data]),
+                   f'{data_path}_{feat_flag}_{batch_flag}.pt')
+    # 真实特征
+    elif not random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
+        print('>>> 读取已有原特征数据...')
+        train_loader, val_data, test_data = torch.load(
+            f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
+        embed_layer = None
+    elif not random_feat:
+        train_loader, val_data, test_data = transform_data(
+            data, to_homo=to_homo, batch=batch)
+        torch.save(DataLoader([train_loader, val_data, test_data]),
+                   f'{data_path}_{feat_flag}_{batch_flag}.pt')
+        embed_layer = None
+    print('数据准备完毕!')
+    return train_loader, val_data, test_data, embed_layer
+
+
+def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
+          hidden_feats=32, out_channels=16, epochs=40, dropout=0, 
+          reg=0.01, lr=0.001, batch=True, to_homo=True):
+    # ---------- 参数 ------------
+    feat_flag = 'Random_feat' if random_feat else 'Real_feat'
+    train_loader, val_data, test_data, embed_layer = prepare_data(
+        random_feat, data, random_feat_dim, feat_flag, batch=batch, to_homo=to_homo)
+    if not batch:
+        train_loader = [train_loader]  # 为了简单处理，用列表装，等同于仅有一个批次
+    tmp_train_data = next(iter(train_loader))  # 采一个样例便于初始化
+    init_sizes = [tmp_train_data.x[tmp_train_data.node_type == node_type].shape[-1]
+                  for node_type in tmp_train_data.node_type.unique()]
+    num_relations = len(tmp_train_data.edge_type.unique())  # 边关系类型数量
+    new_node_types = val_data.node_type.unique()  # 变同质图后，会被标记为0（客户）和1（商品）
+    model = RGCN_LP(in_feats, hidden_feats, out_channels, num_relations,
+                    new_node_types, init_sizes, dropout, reg).to(device)
+    if embed_layer:
+        all_params = itertools.chain(model.parameters(), embed_layer.parameters())
+    else:
+        all_params = model.parameters()
+
+    optimizer = torch.optim.Adam(all_params, lr=lr)
+    criterion = torch.nn.BCELoss().to(device)
+    summary = {'train_loss': [], 'val_loss': [],
+               'test_auc': [], 'test_avg_pre': []}
+    # epoch_count = 0
+    val_data.to(device)
+    test_data.to(device)
+
+    # ---------- 训练 ----------
+    print('开始训练...')
+    with tqdm(total=epochs, leave=False,) as pbar:
+        for epoch in range(epochs):
+            model.train()
+            for train_batch in train_loader:
+                train_batch.to(device)
+                optimizer.zero_grad()
+                edge_label, edge_label_index = negative_sample(train_batch)
+                out = model(train_batch, edge_label_index).view(-1)
+                loss = criterion(out, edge_label) + model.l2_regularization()
+                loss.backward(retain_graph=True)
+                optimizer.step()
+            # validation
+            model.eval()
+            val_loss, test_auc, test_ap = test(model, val_data, test_data)
+            summary['train_loss'].append(loss.item())
+            summary['val_loss'].append(val_loss)
+            summary['test_auc'].append(test_auc)
+            summary['test_avg_pre'].append(test_ap)
+            pbar.set_postfix({'train_loss': round(loss.item(), 2),
+                              'val_loss/min': '{:.2f}/{:.2f}'.format(val_loss, min(summary['val_loss'])),
+                              'test_auc': test_auc,
+                              'test_ap': test_ap})
+            pbar.update(1)
+    print(f'训练完毕，保存数据至：data/result/pyg/link_pre_{feat_flag}.csv...')
+    summary = pd.DataFrame(summary)
+    summary.to_csv(f'data/result/pyg/link_pre_{feat_flag}.csv',
+                   index=False, encoding='utf-8-sig')
+    return summary
+
+
+@torch.no_grad()
+def test(model, val_data, test_data):
+    # cal val loss
+    criterion = torch.nn.BCELoss().to(device)
+    out = model(val_data, val_data.edge_label_index).view(-1)
+    val_loss = criterion(out, val_data.edge_label)
+    # cal metrics
+    out = model(test_data, test_data.edge_label_index).view(-1)
+    auc, ap = get_metrics(out, test_data.edge_label)
+    return val_loss.item(), auc, ap
+
+# 参数
+# in_feats  直接指定即可，RGCN中有一个线性层转化输出统一到此维度
+# hidden_feats  隐藏层，直接指定即可
+# out_channels  输出层，直接指定，最终输出的解码器的输入维度是 2*out_channels
+
+
+summary = train(hetero_data, random_feat=True, random_feat_dim=32,
+                in_feats=16, hidden_feats=32, out_channels=16,
+                epochs=60, dropout=0, reg=0.005, lr=0.02, batch=False,
+                to_homo=True,)

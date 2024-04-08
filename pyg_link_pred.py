@@ -27,7 +27,7 @@ class RelGraphEmbed(nn.Module):
 
     def __init__(self,
                  g,
-                 embed_size,
+                 embed_size=16,
                  embed_name='embed',
                  activation=None,
                  dropout=0.0):
@@ -49,22 +49,24 @@ class RelGraphEmbed(nn.Module):
     def forward(self):
         return self.embeds
 
+
 def negative_sample(data):
     # 从训练集中采样与正边相同数量的负边
     neg_edge_index = negative_sampling(
-        edge_index=data.edge_index, num_nodes=data.num_nodes,
-        num_neg_samples=data.edge_label_index.size(1), method='sparse')
+        edge_index=data['order'].edge_index, num_nodes=data.num_nodes,
+        num_neg_samples=data['order'].edge_label_index.size(1), method='sparse')
     # print(neg_edge_index.size(1))   # 3642条负边，即每次采样与训练集中正边数量一致的负边
     edge_label_index = torch.cat(
-        [data.edge_label_index, neg_edge_index],
+        [data['order'].edge_label_index, neg_edge_index],
         dim=-1,
     )
     edge_label = torch.cat([
-        data.edge_label,
-        data.edge_label.new_zeros(neg_edge_index.size(1))
+        data['order'].edge_label,
+        data['order'].edge_label.new_zeros(neg_edge_index.size(1))
     ], dim=0)
 
     return edge_label, edge_label_index
+
 
 def transform_data(data, batch=True, num_parts=128, batch_size=32, to_homo=True):
     '''_summary_
@@ -103,10 +105,10 @@ def transform_data(data, batch=True, num_parts=128, batch_size=32, to_homo=True)
         train_loader = ClusterLoader(tmp_cls, batch_size=batch_size)
         '''
         train_loader = LinkNeighborLoader(
-            train_data, 
-            [512, 256, 128], 
-            batch_size=32768, 
-            edge_label=train_data.edge_label, 
+            train_data,
+            [512, 256, 128],
+            batch_size=32768,
+            edge_label=train_data.edge_label,
             edge_label_index=train_data.edge_label_index)
         return train_loader, val_data, test_data
     return train_data, val_data, test_data
@@ -127,11 +129,12 @@ class RGCN_LP(nn.Module):
         for i in range(len(node_types)):
             lin = nn.Linear(init_sizes[i], in_channels)
             self.lins.append(lin)
-
         self.fc = nn.Sequential(
             nn.Linear(2 * out_channels, 1),
             nn.Sigmoid()
         )
+        # self.fc = nn.Linear(out_channels, out_channels//2)
+        # self.sigmoid = nn.Sigmoid()
 
     def trans_dimensions(self, xs):
         res = []
@@ -140,14 +143,15 @@ class RGCN_LP(nn.Module):
         return torch.cat(res, dim=0)
 
     def encode(self, data):
-        x = [data.x[data.node_type == node_type]
-             for node_type in self.node_types]
-        x = self.trans_dimensions(x)
-        edge_index, edge_type = data.edge_index, data.edge_type
+        x = [data[node_type].x for node_type in self.node_types]
+        x = self.trans_dimensions(x)  # 线性层转换维度
+        edge_index = torch.cat([data[edge_i].edge_index for edge_i in data.metadata()[1]], dim=1)
+        edge_type = torch.tensor([0] * (edge_index.shape[1]//2) + [1] * (edge_index.shape[1]//2))
         x = self.conv1(x, edge_index, edge_type)
         x = F.relu(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.conv2(x, edge_index, edge_type)
+        # x = self.fc(x)
         return x
 
     def decode(self, z, index):
@@ -155,6 +159,8 @@ class RGCN_LP(nn.Module):
         dst = z[index[1]]
         x = torch.cat([src, dst], dim=-1)
         x = self.fc(x)
+        # x = torch.einsum('ij,ji->i', src, dst.T)
+        # x = self.sigmoid(x)
         return x
 
     def forward(self, data, index):
@@ -175,8 +181,8 @@ def get_metrics(out, label):
     return auc, ap
 
 
-def prepare_data(random_feat, data, random_feat_dim, feat_flag, 
-                 data_path='data/model/pyg/splited_data', 
+def prepare_data(random_feat, data, random_feat_dim, feat_flag,
+                 data_path='data/model/pyg/splited_data',
                  batch=True, to_homo=True):
     batch_flag = 'batch' if batch else 'full'
     if random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
@@ -189,7 +195,8 @@ def prepare_data(random_feat, data, random_feat_dim, feat_flag,
         embed_layer = RelGraphEmbed(data, random_feat_dim)
         for node_type in data.node_types:
             data[node_type].x = embed_layer()[node_type]
-        train_loader, val_data, test_data = transform_data(data, to_homo=to_homo, batch=batch)
+        train_loader, val_data, test_data = transform_data(
+            data, to_homo=to_homo, batch=batch)
         torch.save(DataLoader([train_loader, val_data, test_data]),
                    f'{data_path}_{feat_flag}_{batch_flag}.pt')
     # 真实特征
@@ -199,7 +206,8 @@ def prepare_data(random_feat, data, random_feat_dim, feat_flag,
             f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
         embed_layer = None
     elif not random_feat:
-        train_loader, val_data, test_data = transform_data(data, to_homo=to_homo, batch=batch)
+        train_loader, val_data, test_data = transform_data(
+            data, to_homo=to_homo, batch=batch)
         torch.save(DataLoader([train_loader, val_data, test_data]),
                    f'{data_path}_{feat_flag}_{batch_flag}.pt')
         embed_layer = None
@@ -208,7 +216,7 @@ def prepare_data(random_feat, data, random_feat_dim, feat_flag,
 
 
 def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
-          hidden_feats=32, out_channels=16, epochs=40, dropout=0, 
+          hidden_feats=32, out_channels=16, epochs=40, dropout=0,
           reg=0.01, lr=0.001, batch=True, to_homo=True):
     # ---------- 参数 ------------
     feat_flag = 'Random_feat' if random_feat else 'Real_feat'
@@ -217,10 +225,10 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
     if not batch:
         train_loader = [train_loader]  # 为了简单处理，用列表装，等同于仅有一个批次
     tmp_train_data = next(iter(train_loader))  # 采一个样例便于初始化
-    init_sizes = [tmp_train_data.x[tmp_train_data.node_type == node_type].shape[-1]
-                  for node_type in tmp_train_data.node_type.unique()]
-    num_relations = len(tmp_train_data.edge_type.unique())  # 边关系类型数量
-    new_node_types = val_data.node_type.unique()  # 变同质图后，会被标记为0（客户）和1（商品）
+    init_sizes = [tmp_train_data[node_type].x.shape[-1]
+                  for node_type in tmp_train_data.metadata()[0]]
+    num_relations = len(tmp_train_data.metadata()[1])  # 边关系类型数量
+    new_node_types = val_data.metadata()[0]  # 如果变同质图，会被标记为0（客户）和1（商品）
     model = RGCN_LP(in_feats, hidden_feats, out_channels, num_relations,
                     new_node_types, init_sizes, dropout, reg).to(device)
     if embed_layer:
@@ -241,6 +249,7 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
     print('开始训练...')
     with tqdm(total=epochs, leave=False,) as pbar:
         for epoch in range(epochs):
+            model.train()
             for train_batch in train_loader:
                 train_batch.to(device)
                 optimizer.zero_grad()
@@ -250,6 +259,7 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
                 loss.backward(retain_graph=True)
                 optimizer.step()
             # validation
+            model.eval()
             val_loss, test_auc, test_ap = test(model, val_data, test_data)
             summary['train_loss'].append(loss.item())
             summary['val_loss'].append(val_loss)
@@ -260,7 +270,7 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
                               'test_auc': test_auc,
                               'test_ap': test_ap})
             pbar.update(1)
-    print(f'训练完毕，保存数据至：data/result/pyg/link_pre_{feat_flag}.csv...')
+    print(f'训练完毕，保存数据至：data/result/pyg/link_pre_{feat_flag}.csv')
     summary = pd.DataFrame(summary)
     summary.to_csv(f'data/result/pyg/link_pre_{feat_flag}.csv',
                    index=False, encoding='utf-8-sig')
@@ -269,15 +279,13 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
 
 @torch.no_grad()
 def test(model, val_data, test_data):
-    model.eval()  # 设定模型不可训练
     # cal val loss
     criterion = torch.nn.BCELoss().to(device)
-    out = model(val_data, val_data.edge_label_index).view(-1)
-    val_loss = criterion(out, val_data.edge_label)
+    out = model(val_data, val_data['order'].edge_label_index).view(-1)
+    val_loss = criterion(out, val_data['order'].edge_label)
     # cal metrics
-    out = model(test_data, test_data.edge_label_index).view(-1)
-    auc, ap = get_metrics(out, test_data.edge_label)
-    model.train()
+    out = model(test_data, test_data['order'].edge_label_index).view(-1)
+    auc, ap = get_metrics(out, test_data['order'].edge_label)
     return val_loss.item(), auc, ap
 
 # 参数
@@ -286,7 +294,7 @@ def test(model, val_data, test_data):
 # out_channels  输出层，直接指定，最终输出的解码器的输入维度是 2*out_channels
 
 
-summary = train(hetero_data, random_feat=False, random_feat_dim=32,
+summary = train(hetero_data, random_feat=True, random_feat_dim=32,
                 in_feats=16, hidden_feats=32, out_channels=16,
-                epochs=30, dropout=0, reg=0.001, lr=0.02, batch=False,
+                epochs=60, dropout=0, reg=0.05, lr=0.02, batch=False,
                 to_homo=False,)
