@@ -21,8 +21,10 @@ from sklearn.metrics import confusion_matrix
 gc.collect()
 
 parser = argparse.ArgumentParser(description='Link prediction')
-parser.add_argument('-f', '--file_path', default='data/graph_data.bin', type=str, help='dgl图文件路径')
-parser.add_argument('-d', '--device', default=None, type=str, help='设备, cpu或cuda')
+parser.add_argument('-f', '--file_path',
+                    default='data/graph_data.bin', type=str, help='dgl图文件路径')
+parser.add_argument('-d', '--device', default=None,
+                    type=str, help='设备, cpu或cuda')
 parser.add_argument('-e', '--epoch', default=20, type=int, help='运行回合数')
 parser.add_argument('--begin_seed', default=42, type=int, help='起始种子')
 parser.add_argument('--end_seed', default=52, type=int, help='结束种子')
@@ -207,7 +209,7 @@ class EntityClassify(nn.Module):
             for layer, block in zip(self.layers, blocks):
                 h = layer(block, h)
         return h
-    
+
     def inference(self, g, batch_size, device="cpu", num_workers=0, x=None):
 
         if x is None:
@@ -219,8 +221,8 @@ class EntityClassify(nn.Module):
                     g.number_of_nodes(k),
                     self.h_dim if l != len(self.layers) - 1 else self.out_dim)
                 for k in g.ntypes
-                }
-            
+            }
+
             sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
             dataloader = dgl.dataloading.DataLoader(
                 g,
@@ -230,11 +232,12 @@ class EntityClassify(nn.Module):
                 shuffle=True,
                 drop_last=False,
                 num_workers=num_workers)
-            
+
             for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader):
                 # print(input_nodes)
                 block = blocks[0]  # .to(device)
-                h = {k: x[k][input_nodes[k]].to(device) for k in input_nodes.keys()}
+                h = {k: x[k][input_nodes[k]].to(device)
+                     for k in input_nodes.keys()}
                 h = layer(block, h)
                 for k in h.keys():
                     y[k][output_nodes[k]] = h[k].cpu()
@@ -263,8 +266,8 @@ class Model(nn.Module):
     def forward(self, h, pos_g, neg_g, blocks, etype):
         h = self.rgcn(h, blocks)  # h 是客户的维度12的特征矩阵，输出是转换后的嵌入
         return self.pred(pos_g, h, etype), self.pred(neg_g, h, etype)
-    
-    
+
+
 class MarginLoss(nn.Module):
 
     def forward(self, pos_score, neg_score):
@@ -280,7 +283,8 @@ class HeteroDotProductPredictor(nn.Module):
         # h contains the node representations for each edge type computed from node_clf_hetero.py
         with graph.local_scope():
             graph.ndata['h'] = h  # assigns 'h' of all node types in one shot
-            graph.apply_edges(fn.u_dot_v('h', 'h', 'score'), etype=etype)  # * 在这里给出分数
+            graph.apply_edges(fn.u_dot_v('h', 'h', 'score'),
+                              etype=etype)  # * 在这里给出分数
             return graph.edges[etype].data['score']
 
 
@@ -295,8 +299,10 @@ def train_etype_one_epoch(etype, spec_dataloader):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-    print('{:s} Seed {:d} | avg_Loss {:.4f}'.format(etype, seed, sum(losses) / len(losses)))
+    print('{:s} Seed {:d} | avg_Loss {:.4f}'.format(
+        etype, seed, sum(losses) / len(losses)))
     return losses
+
 
 # 执行训练
 loss_table = {}
@@ -312,10 +318,12 @@ for seed in range(45, 46):
     # 边的条数,数目比顶点个数多很多.
     # 这是 EdgeDataLoader 数据加载器
 
-    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(hetero_graph['order'].num_edges(), dtype=torch.bool).bernoulli(1.0)
+    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(
+        hetero_graph['order'].num_edges(), dtype=torch.bool).bernoulli(1.0)
     train_item_eids = hetero_graph.edges['order'].data['train_mask'].nonzero(as_tuple=True)[0]
 
-    sampler = as_edge_prediction_sampler(sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
+    sampler = as_edge_prediction_sampler(
+        sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
 
     item_dataloader = dgl.dataloading.DataLoader(
         hetero_graph, {'order': train_item_eids}, sampler,
@@ -333,7 +341,6 @@ for seed in range(45, 46):
     optimizer = torch.optim.Adam(all_params, lr=0.01, weight_decay=0)
 
     loss_func = MarginLoss()
-    
 
     print("start seed:", seed)
     model.train()
@@ -341,7 +348,7 @@ for seed in range(45, 46):
     loss_table[seed] = losses
     # 保存模型
     torch.save(model.state_dict(), f'ckpt/model_params_{seed}.pt')
-    
+
 # 保存训练结果
 loss_table = pd.DataFrame(loss_table)
 loss_table.to_csv(f'data/result.csv', index=False, encoding='utf-8-sig')
