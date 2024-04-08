@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 import torch_geometric.transforms as T
 from torch_geometric.utils import negative_sampling
 from torch_geometric.nn import RGCNConv
-from torch_geometric.loader import DataLoader, ClusterData, ClusterLoader, HGTLoader
+from torch_geometric.loader import DataLoader, ClusterData, ClusterLoader, LinkNeighborLoader
 import pandas as pd
 import numpy as np
 import torch
@@ -102,14 +102,12 @@ def transform_data(data, num_parts=128, batch_size=32, to_homo=True):
     train_loader = ClusterLoader(tmp_cls, batch_size=batch_size)
     '''
     
-    train_loader = HGTLoader(
-        train_data,
-        # Sample 512 nodes per type and per iteration for 4 iterations
-        num_samples={key: [512] * 4 for key in hetero_data.node_types},
-        # Use a batch size of 128 for sampling training nodes of type paper
-        batch_size=128,
-        input_nodes=('paper', hetero_data['paper'].train_mask),
-    )
+    train_loader = LinkNeighborLoader(
+        train_data, 
+        [512, 256, 128], 
+        batch_size=32768, 
+        edge_label=train_data.edge_label, 
+        edge_label_index=train_data.edge_label_index)
     return train_loader, val_data, test_data
 
 
