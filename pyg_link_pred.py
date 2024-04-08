@@ -66,7 +66,7 @@ def negative_sample(data):
 
     return edge_label, edge_label_index
 
-def transform_data(data, num_parts=128, batch_size=32, to_homo=True):
+def transform_data(data, batch=True, num_parts=128, batch_size=32, to_homo=True):
     '''_summary_
 
     Parameters
@@ -96,19 +96,20 @@ def transform_data(data, num_parts=128, batch_size=32, to_homo=True):
             0.5*len(hetero_data.metadata()[1])):]
     )(data)
 
-    '''
-    # 训练集太大，分批量
-    tmp_cls = ClusterData(train_data, num_parts)
-    train_loader = ClusterLoader(tmp_cls, batch_size=batch_size)
-    '''
-    
-    train_loader = LinkNeighborLoader(
-        train_data, 
-        [512, 256, 128], 
-        batch_size=32768, 
-        edge_label=train_data.edge_label, 
-        edge_label_index=train_data.edge_label_index)
-    return train_loader, val_data, test_data
+    if batch:
+        '''
+        # 训练集太大，分批量
+        tmp_cls = ClusterData(train_data, num_parts)
+        train_loader = ClusterLoader(tmp_cls, batch_size=batch_size)
+        '''
+        train_loader = LinkNeighborLoader(
+            train_data, 
+            [512, 256, 128], 
+            batch_size=32768, 
+            edge_label=train_data.edge_label, 
+            edge_label_index=train_data.edge_label_index)
+        return train_loader, val_data, test_data
+    return train_data, val_data, test_data
 
 
 class RGCN_LP(nn.Module):
@@ -159,7 +160,7 @@ class RGCN_LP(nn.Module):
     def forward(self, data, index):
         z = self.encode(data)
         z = self.decode(z, index)
-        return z
+        return z  # 输出概率值
 
     def l2_regularization(self):
         l2_reg = torch.tensor(0.0, device=device)
@@ -174,41 +175,47 @@ def get_metrics(out, label):
     return auc, ap
 
 
-def prepare_data(random_feat, data, random_feat_dim, feat_flag, data_path='data/model/pyg/'):
-    if random_feat and os.path.exists(f'{data_path}splited_data_{feat_flag}.pt'):
+def prepare_data(random_feat, data, random_feat_dim, feat_flag, 
+                 data_path='data/model/pyg/splited_data', 
+                 batch=True, to_homo=True):
+    batch_flag = 'batch' if batch else 'full'
+    if random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
         print('>>> 读取已有可训练随机编码...')
         train_loader, val_data, test_data = torch.load(
-            f'{data_path}splited_data_{feat_flag}.pt').dataset
+            f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
         embed_layer = None
     elif random_feat:
         print('>>> 为节点分配可训练随机编码...')
         embed_layer = RelGraphEmbed(data, random_feat_dim)
         for node_type in data.node_types:
             data[node_type].x = embed_layer()[node_type]
-        train_loader, val_data, test_data = transform_data(data, to_homo=True)
+        train_loader, val_data, test_data = transform_data(data, to_homo=to_homo, batch=batch)
         torch.save(DataLoader([train_loader, val_data, test_data]),
-                   f'{data_path}splited_data_{feat_flag}.pt')
+                   f'{data_path}_{feat_flag}_{batch_flag}.pt')
     # 真实特征
-    elif not random_feat and os.path.exists(f'{data_path}splited_data_{feat_flag}.pt'):
-        print('>>> 读取已有数据...')
+    elif not random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
+        print('>>> 读取已有原特征数据...')
         train_loader, val_data, test_data = torch.load(
-            f'{data_path}splited_data_{feat_flag}.pt').dataset
+            f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
         embed_layer = None
     elif not random_feat:
-        train_loader, val_data, test_data = transform_data(data, to_homo=True)
+        train_loader, val_data, test_data = transform_data(data, to_homo=to_homo, batch=batch)
         torch.save(DataLoader([train_loader, val_data, test_data]),
-                   f'{data_path}splited_data_{feat_flag}.pt')
+                   f'{data_path}_{feat_flag}_{batch_flag}.pt')
         embed_layer = None
     print('数据准备完毕!')
     return train_loader, val_data, test_data, embed_layer
 
 
 def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
-          hidden_feats=32, out_channels=16, epochs=40, dropout=0, reg=0.01, lr=0.001):
+          hidden_feats=32, out_channels=16, epochs=40, dropout=0, 
+          reg=0.01, lr=0.001, batch=True, to_homo=True):
     # ---------- 参数 ------------
     feat_flag = 'Random_feat' if random_feat else 'Real_feat'
     train_loader, val_data, test_data, embed_layer = prepare_data(
-        random_feat, data, random_feat_dim, feat_flag)
+        random_feat, data, random_feat_dim, feat_flag, batch=batch, to_homo=to_homo)
+    if not batch:
+        train_loader = [train_loader]  # 为了简单处理，用列表装，等同于仅有一个批次
     tmp_train_data = next(iter(train_loader))  # 采一个样例便于初始化
     init_sizes = [tmp_train_data.x[tmp_train_data.node_type == node_type].shape[-1]
                   for node_type in tmp_train_data.node_type.unique()]
@@ -219,7 +226,7 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
     if embed_layer:
         all_params = itertools.chain(model.parameters(), embed_layer.parameters())
     else:
-        all_params = itertools.chain(model.parameters())
+        all_params = model.parameters()
 
     optimizer = torch.optim.Adam(all_params, lr=lr)
     criterion = torch.nn.BCELoss().to(device)
@@ -253,9 +260,9 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
                               'test_auc': test_auc,
                               'test_ap': test_ap})
             pbar.update(1)
-    print('训练完毕，保存数据...')
+    print(f'训练完毕，保存数据至：data/result/pyg/link_pre_{feat_flag}.csv...')
     summary = pd.DataFrame(summary)
-    summary.to_csv(f'data/result/pyg/pyg_link_pre_{feat_flag}.csv',
+    summary.to_csv(f'data/result/pyg/link_pre_{feat_flag}.csv',
                    index=False, encoding='utf-8-sig')
     return summary
 
@@ -279,6 +286,7 @@ def test(model, val_data, test_data):
 # out_channels  输出层，直接指定，最终输出的解码器的输入维度是 2*out_channels
 
 
-summary = train(hetero_data, random_feat=True, random_feat_dim=32,
+summary = train(hetero_data, random_feat=False, random_feat_dim=32,
                 in_feats=16, hidden_feats=32, out_channels=16,
-                epochs=30, dropout=0, reg=0.02, lr=0.05)
+                epochs=30, dropout=0, reg=0.001, lr=0.02, batch=False,
+                to_homo=False,)
