@@ -10,7 +10,6 @@ args = parser.parse_args()
 
 data = pd.read_csv(f'data/result/pyg/{args.file_name}')
 data.plot()
-plt.ylim((0,1.5))
 plt.title('训练结果')
 plt.xlabel('Epoch')
 plt.show()

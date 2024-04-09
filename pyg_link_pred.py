@@ -6,6 +6,7 @@ import seaborn as sns
 import torch
 import torch.nn as nn
 from sklearn.metrics import roc_auc_score, average_precision_score
+import torch_geometric
 import torch_geometric.transforms as T
 from torch_geometric.utils import negative_sampling
 from torch_geometric.nn import RGCNConv
@@ -183,12 +184,12 @@ def get_metrics(out, label):
 
 def prepare_data(random_feat, data, random_feat_dim, feat_flag,
                  data_path='data/model/pyg/splited_data',
-                 batch=True, to_homo=True):
+                 batch=True, to_homo=True, seed=42):
     batch_flag = 'batch' if batch else 'full'
-    if random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
+    path = f'{data_path}_{feat_flag}_{batch_flag}_{seed}.pt'
+    if random_feat and os.path.exists(path):
         print('>>> 读取已有可训练随机编码...')
-        train_loader, val_data, test_data = torch.load(
-            f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
+        train_loader, val_data, test_data = torch.load(path).dataset
         embed_layer = None
     elif random_feat:
         print('>>> 为节点分配可训练随机编码...')
@@ -197,19 +198,16 @@ def prepare_data(random_feat, data, random_feat_dim, feat_flag,
             data[node_type].x = embed_layer()[node_type]
         train_loader, val_data, test_data = transform_data(
             data, to_homo=to_homo, batch=batch)
-        torch.save(DataLoader([train_loader, val_data, test_data]),
-                   f'{data_path}_{feat_flag}_{batch_flag}.pt')
+        torch.save(DataLoader([train_loader, val_data, test_data]), path)
     # 真实特征
-    elif not random_feat and os.path.exists(f'{data_path}_{feat_flag}_{batch_flag}.pt'):
+    elif not random_feat and os.path.exists(path):
         print('>>> 读取已有原特征数据...')
-        train_loader, val_data, test_data = torch.load(
-            f'{data_path}_{feat_flag}_{batch_flag}.pt').dataset
+        train_loader, val_data, test_data = torch.load(path).dataset
         embed_layer = None
     elif not random_feat:
         train_loader, val_data, test_data = transform_data(
             data, to_homo=to_homo, batch=batch)
-        torch.save(DataLoader([train_loader, val_data, test_data]),
-                   f'{data_path}_{feat_flag}_{batch_flag}.pt')
+        torch.save(DataLoader([train_loader, val_data, test_data]), path)
         embed_layer = None
     print('数据准备完毕!')
     return train_loader, val_data, test_data, embed_layer
@@ -217,11 +215,14 @@ def prepare_data(random_feat, data, random_feat_dim, feat_flag,
 
 def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
           hidden_feats=32, out_channels=16, epochs=40, dropout=0,
-          reg=0.01, lr=0.001, batch=True, to_homo=True):
+          reg=0.01, lr=0.001, batch=True, to_homo=True, seed=42):
     # ---------- 参数 ------------
+    torch.manual_seed(seed)
+    torch_geometric.seed_everything(seed)
     feat_flag = 'Random_feat' if random_feat else 'Real_feat'
     train_loader, val_data, test_data, embed_layer = prepare_data(
-        random_feat, data, random_feat_dim, feat_flag, batch=batch, to_homo=to_homo)
+        random_feat, data, random_feat_dim, feat_flag, batch=batch,
+        to_homo=to_homo, seed=seed)
     if not batch:
         train_loader = [train_loader]  # 为了简单处理，用列表装，等同于仅有一个批次
     tmp_train_data = next(iter(train_loader))  # 采一个样例便于初始化
@@ -241,7 +242,6 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
     summary = {'train_loss': [], 'val_loss': [],
                'test_auc': [], 'test_avg_pre': []}
     # epoch_count = 0
-    model.train()  # 设定模型为可训练
     val_data.to(device)
     test_data.to(device)
 
@@ -270,9 +270,9 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
                               'test_auc': test_auc,
                               'test_ap': test_ap})
             pbar.update(1)
-    print(f'训练完毕，保存数据至：data/result/pyg/link_pre_{feat_flag}.csv')
+    print(f'训练完毕，保存数据至：data/result/pyg/{feat_flag}_{seed}.csv')
     summary = pd.DataFrame(summary)
-    summary.to_csv(f'data/result/pyg/link_pre_{feat_flag}.csv',
+    summary.to_csv(f'data/result/pyg/{feat_flag}_{seed}.csv',
                    index=False, encoding='utf-8-sig')
     return summary
 
@@ -293,8 +293,9 @@ def test(model, val_data, test_data):
 # hidden_feats  隐藏层，直接指定即可
 # out_channels  输出层，直接指定，最终输出的解码器的输入维度是 2*out_channels
 
-
-summary = train(hetero_data, random_feat=True, random_feat_dim=32,
-                in_feats=16, hidden_feats=32, out_channels=16,
-                epochs=60, dropout=0, reg=0.05, lr=0.02, batch=False,
-                to_homo=False,)
+for seed in range(42, 53):
+    print(f'----- {seed} -----')
+    summary = train(hetero_data, random_feat=True, random_feat_dim=32,
+                    in_feats=16, hidden_feats=32, out_channels=16,
+                    epochs=60, dropout=0, reg=0.01, lr=0.02, batch=False,
+                    to_homo=False, seed=seed)
