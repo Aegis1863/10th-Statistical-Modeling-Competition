@@ -134,7 +134,8 @@ class RGCN_LP(nn.Module):
             nn.Linear(2 * out_channels, 1),
             nn.Sigmoid()
         )
-        self.fc_test = nn.Linear(out_channels, out_channels)
+        # self.fc = nn.Linear(out_channels, out_channels//2)
+        # self.sigmoid = nn.Sigmoid()
 
     def trans_dimensions(self, xs):
         res = []
@@ -151,16 +152,13 @@ class RGCN_LP(nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.conv2(x, edge_index, edge_type)
-        x = F.sigmoid(self.fc_test(x))
         return x
 
     def decode(self, z, index):
         src = z[index[0]]
         dst = z[index[1]]
-        x = torch.einsum('ij,ji->i', src, dst.T)
-        x = F.sigmoid(x)
-        # x = torch.cat([src, dst], dim=-1)
-        # x = self.fc(x)
+        x = torch.cat([src, dst], dim=-1)
+        x = self.fc(x)
         return x
 
     def forward(self, data, index):
@@ -309,7 +307,7 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
                               'test_auc': test_auc,
                               'test_ap': test_ap})
             pbar.update(1)
-    path = f'data/result/pyg/test/{feat_flag}_{seed}.csv'
+    path = f'data/result/pyg/{feat_flag}_{seed}.csv'
     print(f'训练完毕，保存数据至：{path}')
     summary = pd.DataFrame(summary)
     summary.to_csv(path, index=False, encoding='utf-8-sig')
@@ -333,7 +331,7 @@ def test(model, val_data, test_data):
 # out_channels  输出层，直接指定，最终输出的解码器的输入维度是 2*out_channels
 
 
-for seed in range(43, 44):
+for seed in range(43, 53):
     print(f'----- {seed} -----')
     summary = train(hetero_data, random_feat=True, random_feat_dim=32,
                     in_feats=16, hidden_feats=32, out_channels=16,
