@@ -333,7 +333,7 @@ def test(model, val_data, test_data):
 
 for seed in range(43, 53):
     print(f'----- {seed} -----')
-    summary = train(hetero_data, random_feat=True, random_feat_dim=32,
+    summary = train(hetero_data, random_feat=False, random_feat_dim=32,
                     in_feats=16, hidden_feats=32, out_channels=16,
                     epochs=50, dropout=0, reg=0.001, lr=0.015, batch=False,
                     to_homo=True, seed=seed, save=False)

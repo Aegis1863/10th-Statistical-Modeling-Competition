@@ -13,4 +13,3 @@ data.plot()
 plt.title('训练结果')
 plt.xlabel('Epoch')
 plt.show()
-
