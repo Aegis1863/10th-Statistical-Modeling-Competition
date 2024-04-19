@@ -288,6 +288,8 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
     print('开始训练...')
     with tqdm(total=epochs, leave=False,) as pbar:
         for epoch in range(epochs):
+            if epoch == epochs-2:
+                print('调试...')
             model.train()
             for train_batch in train_loader:
                 train_batch.to(device)
