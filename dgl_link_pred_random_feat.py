@@ -324,7 +324,9 @@ for seed in range(45, 46):
 
     sampler = as_edge_prediction_sampler(
         sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
-
+    
+    # TODO 在建立加载器之前划分验证集和测试集
+    
     item_dataloader = dgl.dataloading.DataLoader(
         hetero_graph, {'order': train_item_eids}, sampler,
         batch_size=batch_size, shuffle=True)
