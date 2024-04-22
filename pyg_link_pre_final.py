@@ -171,7 +171,10 @@ class RGCN_LP(nn.Module):
         for param in self.parameters():
             l2_reg += torch.norm(param, p=2)
         return self.reg_lambda * l2_reg
-
+    
+    def inference(self, x: torch.tensor):
+        
+        pass
 
 def get_metrics(out, label):
     auc = roc_auc_score(label.cpu().numpy(), out.cpu().numpy())
@@ -311,6 +314,7 @@ def train(data, random_feat=False, random_feat_dim=32, in_feats=16,
     print(f'训练完毕，保存数据至：{path}')
     summary = pd.DataFrame(summary)
     summary.to_csv(path, index=False, encoding='utf-8-sig')
+    torch.save(model.state_dict(), f'ckpt/test/model_params_{seed}.pt')
     return summary
 
 

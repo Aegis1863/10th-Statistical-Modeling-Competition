@@ -10,7 +10,7 @@ import torch_geometric
 import torch_geometric.transforms as T
 from torch_geometric.utils import negative_sampling
 from torch_geometric.nn import RGCNConv
-from torch_geometric.loader import DataLoader, ClusterData, ClusterLoader, LinkNeighborLoader
+from torch_geometric.loader import DataLoader, LinkNeighborLoader
 import pandas as pd
 import numpy as np
 import torch
@@ -292,6 +292,8 @@ def test(model, val_data, test_data):
 # in_feats  直接指定即可，RGCN中有一个线性层转化输出统一到此维度
 # hidden_feats  隐藏层，直接指定即可
 # out_channels  输出层，直接指定，最终输出的解码器的输入维度是 2*out_channels
+
+# ! 由于选择不转同质图，训练效果差，暂时放弃该方案
 
 for seed in range(42, 53):
     print(f'----- {seed} -----')

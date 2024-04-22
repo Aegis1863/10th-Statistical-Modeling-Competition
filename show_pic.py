@@ -13,3 +13,10 @@ data.plot()
 plt.title('训练结果')
 plt.xlabel('Epoch')
 plt.show()
+
+environment -> state
+while t < end_time:
+	action = model(state)
+	next_state, reward = environment(action)
+	state = next_state
+	train(model, reward)
