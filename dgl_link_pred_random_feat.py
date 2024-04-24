@@ -17,17 +17,20 @@ import torch as th
 import dgl.nn as dglnn
 import gc
 import wandb
+import warnings
 from sklearn.metrics import confusion_matrix
+
+warnings.filterwarnings('ignore')
 gc.collect()
 
 parser = argparse.ArgumentParser(description='Link prediction')
 parser.add_argument('-f', '--file_path',
-                    default='data/graph_data.bin', type=str, help='dgl图文件路径')
+                    default='data/model/dgl/graph_data.bin', type=str, help='dgl图文件路径')
 parser.add_argument('-d', '--device', default=None,
                     type=str, help='设备, cpu或cuda')
 parser.add_argument('-e', '--epoch', default=20, type=int, help='运行回合数')
 parser.add_argument('--begin_seed', default=42, type=int, help='起始种子')
-parser.add_argument('--end_seed', default=52, type=int, help='结束种子')
+parser.add_argument('--end_seed', default=43, type=int, help='结束种子')
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -288,25 +291,40 @@ class HeteroDotProductPredictor(nn.Module):
             return graph.edges[etype].data['score']
 
 
-def train_etype_one_epoch(etype, spec_dataloader):
-    losses = []
+def train_etype_one_epoch(etype, train_dataloader, test_dataloader):
+    train_losses = []
+    val_losses = []
     #  input nodes 为采样的subgraph中的所有的节点的集合
+    for input_nodes, pos_g, neg_g, blocks in tqdm.tqdm(train_dataloader):
+        model.train()
+        emb = extract_embed(all_node_embed, input_nodes)
+        pos_score, neg_score = model(emb, pos_g, neg_g, blocks, etype)
+        loss = loss_func(pos_score, neg_score)
+        train_losses.append(loss.item())
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        val_loss = test(etype, test_dataloader)
+        val_losses.append(val_loss)
+        print('\n {:s} Seed {:d} | Train_avg_loss {:.3f} | Val_avg_loss {:.3f}'.format(
+            etype, seed, sum(train_losses) / len(train_losses), val_loss))
+    return train_losses, val_losses
+
+def test(etype, spec_dataloader):
+    model.eval()
+    val_losses = []
     for input_nodes, pos_g, neg_g, blocks in tqdm.tqdm(spec_dataloader):
         emb = extract_embed(all_node_embed, input_nodes)
         pos_score, neg_score = model(emb, pos_g, neg_g, blocks, etype)
         loss = loss_func(pos_score, neg_score)
-        losses.append(loss.item())
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    print('{:s} Seed {:d} | avg_Loss {:.4f}'.format(
-        etype, seed, sum(losses) / len(losses)))
-    return losses
-
+        val_losses.append(loss.item())
+    avg_val_loss = sum(val_losses) / len(val_losses)
+    return avg_val_loss
 
 # 执行训练
-loss_table = {}
-for seed in range(45, 46):
+train_loss_table = {}
+val_loss_table = {}
+for seed in range(args.begin_seed, args.end_seed):
     torch.manual_seed(seed)
     dgl.seed(seed)
     # 采样定义
@@ -317,17 +335,27 @@ for seed in range(45, 46):
     sampler = MultiLayerFullNeighborSampler(2)
     # 边的条数,数目比顶点个数多很多.
     # 这是 EdgeDataLoader 数据加载器
-
-    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(
-        hetero_graph['order'].num_edges(), dtype=torch.bool).bernoulli(1.0)
+    total_edges = hetero_graph['order'].num_edges()
+    # 训练集占 70%
+    train_size = int(0.7 * total_edges)
+    val_size = total_edges - train_size
+    random_indices = torch.randperm(total_edges)  # 随机索引
+    hetero_graph.edges['order'].data['train_mask'] = torch.zeros(total_edges, dtype=torch.bool)
+    hetero_graph.edges['order'].data['train_mask'][random_indices[:train_size]] = True  # 标记训练集
+    hetero_graph.edges['order'].data['val_mask'] = ~hetero_graph.edges['order'].data['train_mask']  # 标记验证集
+    # 获取训练集和验证集的边索引
     train_item_eids = hetero_graph.edges['order'].data['train_mask'].nonzero(as_tuple=True)[0]
+    val_item_eids = hetero_graph.edges['order'].data['val_mask'].nonzero(as_tuple=True)[0]
 
     sampler = as_edge_prediction_sampler(
         sampler, negative_sampler=dgl.dataloading.negative_sampler.Uniform(neg_sample_count))
 
-    item_dataloader = dgl.dataloading.DataLoader(
+    train_dataloader = dgl.dataloading.DataLoader(
         hetero_graph, {'order': train_item_eids}, sampler,
         batch_size=batch_size, shuffle=True)
+    val_dataloader = dgl.dataloading.DataLoader(
+        hetero_graph, {'order': val_item_eids}, sampler,
+        batch_size=batch_size, shuffle=False)
 
     hidden_feat_dim = 12  # 客户特征长度
     out_feat_dim = 12
@@ -343,12 +371,15 @@ for seed in range(45, 46):
     loss_func = MarginLoss()
 
     print("start seed:", seed)
-    model.train()
-    losses = train_etype_one_epoch('order', item_dataloader)
-    loss_table[seed] = losses
+    
+    train_losses, val_losses = train_etype_one_epoch('order', train_dataloader, val_dataloader)
+    train_loss_table[seed] = train_losses
+    val_loss_table[seed] = val_losses
     # 保存模型
-    torch.save(model.state_dict(), f'ckpt/model_params_{seed}.pt')
+    # torch.save(model.state_dict(), f'ckpt/model_params_{seed}.pt')
 
 # 保存训练结果
-loss_table = pd.DataFrame(loss_table)
-loss_table.to_csv(f'data/result.csv', index=False, encoding='utf-8-sig')
+train_loss_table = pd.DataFrame(train_loss_table)
+val_loss_table = pd.DataFrame(val_loss_table)
+train_loss_table.to_csv(f'data/result/dgl/train_loss.csv', index=False, encoding='utf-8-sig')
+val_loss_table.to_csv(f'data/result/dgl/val_loss.csv', index=False, encoding='utf-8-sig')
