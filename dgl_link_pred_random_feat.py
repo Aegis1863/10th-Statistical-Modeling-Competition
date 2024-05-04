@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import dgl
 from dgl.dataloading import MultiLayerFullNeighborSampler, as_edge_prediction_sampler
-from dgl.dataloading.negative_sampler import Uniform
 import pandas as pd
 import itertools
 import tqdm
@@ -13,18 +12,15 @@ import dgl
 import torch.nn.functional as F
 from dgl.nn.pytorch import GraphConv, HeteroGraphConv
 import tqdm
-import torch as th
 import dgl.nn as dglnn
 import gc
-import wandb
 import warnings
-from sklearn.metrics import confusion_matrix
 
 warnings.filterwarnings('ignore')
 gc.collect()
 
 parser = argparse.ArgumentParser(description='Link prediction')
-parser.add_argument('-f', '--file_path',
+parser.add_argument('-f', '--file_patorch',
                     default='data/model/dgl/graph_data.bin', type=str, help='dgl图文件路径')
 parser.add_argument('-d', '--device', default=None,
                     type=str, help='设备, cpu或cuda')
@@ -35,7 +31,7 @@ args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device = device if args.device == None else args.device
-hetero_graph = dgl.load_graphs(args.file_path)[0][0]
+hetero_graph = dgl.load_graphs(args.file_patorch)[0][0]
 
 print(f'device: {device}')
 print('图结构: \n', hetero_graph)
@@ -81,18 +77,18 @@ class RelGraphConvLayer(nn.Module):
             else:
                 # 每个关系,又一个weight,全连接层
                 self.weight = nn.Parameter(
-                    th.Tensor(len(self.rel_names), in_feat, out_feat))
+                    torch.Tensor(len(self.rel_names), in_feat, out_feat))
                 nn.init.xavier_uniform_(
                     self.weight, gain=nn.init.calculate_gain('relu'))
 
         # bias
         if bias:
-            self.h_bias = nn.Parameter(th.Tensor(out_feat))
+            self.h_bias = nn.Parameter(torch.Tensor(out_feat))
             nn.init.zeros_(self.h_bias)
 
         # weight for self loop
         if self.self_loop:
-            self.loop_weight = nn.Parameter(th.Tensor(in_feat, out_feat))
+            self.loop_weight = nn.Parameter(torch.Tensor(in_feat, out_feat))
             nn.init.xavier_uniform_(self.loop_weight,
                                     gain=nn.init.calculate_gain('relu'))
 
@@ -105,7 +101,7 @@ class RelGraphConvLayer(nn.Module):
             weight = self.basis() if self.use_basis else self.weight
             # 这每个关系对应一个权重矩阵对应输入维度和输出维度
             wdict = {self.rel_names[i]: {'weight': w.squeeze(0)}
-                     for i, w in enumerate(th.split(weight, 1, dim=0))}
+                     for i, w in enumerate(torch.split(weight, 1, dim=0))}
         else:
             wdict = {}
 
@@ -123,7 +119,7 @@ class RelGraphConvLayer(nn.Module):
 
         def _apply(ntype, h):
             if self.self_loop:
-                h = h + th.matmul(inputs_dst[ntype], self.loop_weight)
+                h = h + torch.matmul(inputs_dst[ntype], self.loop_weight)
             if self.bias:
                 h = h + self.h_bias
             if self.activation:
@@ -220,7 +216,7 @@ class EntityClassify(nn.Module):
 
         for l, layer in enumerate(self.layers):
             y = {
-                k: th.zeros(
+                k: torch.zeros(
                     g.number_of_nodes(k),
                     self.h_dim if l != len(self.layers) - 1 else self.out_dim)
                 for k in g.ntypes
@@ -229,7 +225,7 @@ class EntityClassify(nn.Module):
             sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
             dataloader = dgl.dataloading.DataLoader(
                 g,
-                {k: th.arange(g.number_of_nodes(k)) for k in g.ntypes},
+                {k: torch.arange(g.number_of_nodes(k)) for k in g.ntypes},
                 sampler,
                 batch_size=batch_size,
                 shuffle=True,
@@ -283,8 +279,8 @@ class HeteroDotProductPredictor(nn.Module):
 
     def forward(self, graph, h, etype):
         # 在计算之外更新h, 保存为全局可用
-        # h contains the node representations for each edge type computed from node_clf_hetero.py
-        with graph.local_scope():
+        # h contains torche node representations for each edge type computed from node_clf_hetero.py
+        witorch graph.local_scope():
             graph.ndata['h'] = h  # assigns 'h' of all node types in one shot
             graph.apply_edges(fn.u_dot_v('h', 'h', 'score'),
                               etype=etype)  # * 在这里给出分数
